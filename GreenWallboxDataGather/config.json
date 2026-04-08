@@ -1,0 +1,12 @@
+{
+    "username": "User1",
+    "password": "Pass1",
+    "object_ids": "3326501,4478702",
+    "api_login_url": "https://greenwallbox.cloud/api/users/login",
+    "api_export_url": "https://greenwallbox.cloud/api/export/wallbox",
+    "sql_server": "192.168.0.1\\reports",
+    "sql_database": "reports",
+    "sql_user": "sa",
+    "sql_password": "admin123",
+    "Update_date": "2025-11-05 22:14:01"
+}

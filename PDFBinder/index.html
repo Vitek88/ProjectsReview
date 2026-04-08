@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PDF Binder</title>
+  <link rel="stylesheet" href="lib/bootstrap.min.css">
+  <style>
+    body{padding:24px}
+    .dropzone{border:2px dashed #bbb;border-radius:8px;padding:24px;text-align:center;min-height:140px}
+    .file-list{max-height:420px;overflow:auto}
+    .file-item{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border:1px solid #eee;border-radius:6px;margin-bottom:8px;background:#fff}
+    .file-meta{display:flex;gap:12px;align-items:center}
+    .file-name{font-weight:600}
+    .small-muted{font-size:0.9rem;color:#666}
+    .spinner-border-sm{width:1rem;height:1rem}
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1 class="mb-3">PDF Binder</h1>
+  <p>Drag and drop files here or click to select manually. The order of merging is arbitrary — you can drag items on the list to arrange them.</p>
+
+  <div class="row mb-3">
+    <div class="col-12">
+      <div id="dropzone" class="dropzone mb-2">
+        <p class="mb-0">Drag and drop PDF, DOCX, XLSX, PPTX, ODT files here. (DOCX/XLSX will be converted to PDF on the client side). PPTX: if you want a faithful conversion, convert to PDF before using or see instructions in the program's README.</p>
+        <input id="fileInput" type="file" multiple style="display:none" />
+        <div class="mt-2">
+          <button id="pickBtn" class="btn btn-primary btn-sm">Wybierz pliki</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row mb-3">
+    <div class="col-12">
+      <div class="card">
+        <div class="card-body">
+          <h5 class="card-title">File List</h5>
+          <div id="fileList" class="file-list list-group mb-3"></div>
+          <div class="d-flex justify-content-between">
+            <div>
+              <small class="small-muted">Drag items to reorder.</small>
+            </div>
+            <div>
+              <button id="mergeBtn" class="btn btn-success">Merge into One PDF</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="log" class="mb-3"></div>
+
+</div>
+
+<!-- Biblioteki (lokalnie w /lib) -->
+<script src="lib/pdf-lib.min.js"></script>
+<script src="lib/mammoth.browser.min.js"></script>
+<script src="lib/html2pdf.bundle.min.js"></script>
+<script src="lib/xlsx.full.min.js"></script>
+<script src="lib/sortable.min.js"></script>
+
+<script>
+// PROJEKT: PDF Binder — cały kod klient-side
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+const pickBtn = document.getElementById('pickBtn');
+const fileListEl = document.getElementById('fileList');
+const mergeBtn = document.getElementById('mergeBtn');
+const logEl = document.getElementById('log');
+
+let files = []; // {id, file, name, type, status, pdfArrayBuffer (when ready)}
+let idCounter = 1;
+
+function log(msg, kind='info'){
+  const p = document.createElement('div');
+  p.innerHTML = `<small class='text-${kind==='err'?'danger':'muted'}'>${msg}</small>`;
+  logEl.appendChild(p);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+pickBtn.addEventListener('click', ()=> fileInput.click());
+fileInput.addEventListener('change', (e)=> handleFiles(Array.from(e.target.files)));
+
+['dragenter','dragover'].forEach(ev=>{
+  dropzone.addEventListener(ev, (e)=>{e.preventDefault();dropzone.classList.add('border-primary');});
+});
+['dragleave','drop'].forEach(ev=>{
+  dropzone.addEventListener(ev, (e)=>{e.preventDefault();dropzone.classList.remove('border-primary');});
+});
+
+dropzone.addEventListener('drop', (e)=>{
+  const dt = e.dataTransfer;
+  if(!dt) return;
+  const dropped = Array.from(dt.files || []);
+  handleFiles(dropped);
+});
+
+function handleFiles(selected){
+  selected.forEach(f=>{
+    const id = idCounter++;
+    files.push({id,file:f,name:f.name,type:f.type || guessType(f.name),status:'added'});
+  });
+  renderList();
+}
+
+function guessType(name){
+  const ext = name.split('.').pop().toLowerCase();
+  if(ext==='pdf') return 'application/pdf';
+  if(['docx','doc'].includes(ext)) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  if(['xlsx','xls'].includes(ext)) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  if(['pptx','ppt'].includes(ext)) return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+  return 'application/octet-stream';
+}
+
+function renderList(){
+  fileListEl.innerHTML='';
+  files.forEach(item=>{
+    const el = document.createElement('div');
+    el.className = 'file-item list-group-item';
+    el.dataset.id = item.id;
+    el.innerHTML = `
+      <div class="file-meta">
+        <span class="drag-handle" style="cursor:grab">☰</span>
+        <div>
+          <div class="file-name">${escapeHtml(item.name)}</div>
+          <div class="small-muted">${item.type} • ${item.status}</div>
+        </div>
+      </div>
+      <div>
+        <button class="btn btn-sm btn-outline-danger remove-btn">Usuń</button>
+      </div>
+    `;
+    fileListEl.appendChild(el);
+  });
+
+  // add listeners for remove
+  fileListEl.querySelectorAll('.remove-btn').forEach(btn=>{
+    btn.addEventListener('click', (e)=>{
+      const id = Number(e.target.closest('.file-item').dataset.id);
+      files = files.filter(f=>f.id !== id);
+      renderList();
+    });
+  });
+
+  // make sortable
+  if(window.Sortable){
+    Sortable.create(fileListEl, {handle:'.drag-handle', animation:150, onEnd: (ev)=>{
+      const oldIndex = ev.oldIndex; const newIndex = ev.newIndex;
+      const moved = files.splice(oldIndex,1)[0];
+      files.splice(newIndex,0,moved);
+      renderList();
+    }});
+  }
+}
+
+function escapeHtml(s){ return s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'); }
+
+mergeBtn.addEventListener('click', async ()=>{
+  if(files.length===0){ log('No files selected','err'); return; }
+  mergeBtn.disabled = true; mergeBtn.textContent='Processing...';
+  try{
+    // Step 1: ensure each file has pdfArrayBuffer
+    for(const item of files){
+      log(`Processing: ${item.name}`);
+      item.status = 'processing'; renderList();
+      if(isPDF(item)){
+        item.pdfArrayBuffer = await fileToArrayBuffer(item.file);
+        item.status = 'ready'; renderList();
+      } else if(isDocx(item)){
+        // convert docx -> html using mammoth, then html -> pdf using html2pdf
+        const ab = await fileToArrayBuffer(item.file);
+        const result = await mammoth.convertToHtml({arrayBuffer:ab});
+        const html = `<!doctype html><html><head><meta charset="utf-8"></head><body>${result.value}</body></html>`;
+        const pdfBlob = await htmlToPdfBlob(html, item.name);
+        item.pdfArrayBuffer = await blobToArrayBuffer(pdfBlob);
+        item.status='ready'; renderList();
+      } else if(isXlsx(item)){
+        const ab = await fileToArrayBuffer(item.file);
+        const wb = XLSX.read(ab, {type:'array'});
+        // convert first sheet (or all) to html
+        let html = '';
+        wb.SheetNames.forEach(name=>{
+          const ws = wb.Sheets[name];
+          html += `<h3>${escapeHtml(name)}</h3>` + XLSX.utils.sheet_to_html(ws);
+        });
+        const pdfBlob = await htmlToPdfBlob(`<!doctype html><html><head><meta charset="utf-8"></head><body>${html}</body></html>`, item.name);
+        item.pdfArrayBuffer = await blobToArrayBuffer(pdfBlob);
+        item.status='ready'; renderList();
+      } else if(isPptx(item)){
+        // client-side faithful pptx -> PDF is hard. We skip with warning.
+        log(`PPTX detected: ${item.name}. PPTX is not converted in "light" mode. Please convert to PDF beforehand or use LibreOffice WASM (see README).`,'err');
+        item.status='unsupported'; renderList();
+      } else {
+        log(`Unsupported format: ${item.name} — skipped.`,'err');
+        item.status='unsupported'; renderList();
+      }
+    }
+
+    // Check for at least one ready PDF
+    const readyItems = files.filter(f=>f.status==='ready');
+    if(readyItems.length===0){ log('No ready PDF files to merge.','err'); mergeBtn.disabled=false; mergeBtn.textContent='Merge into One PDF'; return; }
+
+    // Merge PDFs in the current order, skipping unsupported
+    const mergedPdfBytes = await mergePdfBuffers(files.filter(f=>f.status==='ready').map(f=>f.pdfArrayBuffer));
+
+    // prepare filename
+    const firstName = files[0] ? files[0].name.split('.').slice(0,-1).join('.') || 'output' : 'output';
+    const filename = `Binder_${sanitizeFilename(firstName)}.pdf`;
+
+    downloadBlob(new Blob([mergedPdfBytes], {type:'application/pdf'}), filename);
+    log(`Ready — downloading file: ${filename}`);
+  }catch(err){
+    console.error(err); log('Error during merging: '+err.message,'err');
+  }finally{
+    mergeBtn.disabled=false; mergeBtn.textContent='Merge into One PDF';
+    renderList();
+  }
+});
+
+// Helpers
+function isPDF(item){ return item.name.toLowerCase().endsWith('.pdf') || item.type==='application/pdf'; }
+function isDocx(item){ return item.name.toLowerCase().match(/\.docx?$/) || item.type.includes('word'); }
+function isXlsx(item){ return item.name.toLowerCase().match(/\.xlsx?$/) || item.type.includes('spreadsheet'); }
+function isPptx(item){ return item.name.toLowerCase().match(/\.pptx?$/) || item.type.includes('presentation'); }
+
+function fileToArrayBuffer(file){ return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=rej; r.readAsArrayBuffer(file); }); }
+function blobToArrayBuffer(blob){ return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=rej; r.readAsArrayBuffer(blob); }); }
+
+async function htmlToPdfBlob(html, label){
+  // create an offscreen iframe or container
+  const wrapper = document.createElement('div'); wrapper.style.width='794px'; // A4-ish
+  wrapper.innerHTML = html;
+  document.body.appendChild(wrapper);
+  // html2pdf uses Promise
+  const opt = {margin:0.5, filename:label+'.pdf', enableLinks:true, html2canvas:{scale:1}, jsPDF:{unit:'in',format:'a4'}};
+  const pdfBlob = await html2pdf().from(wrapper).set(opt).outputPdf('blob');
+  document.body.removeChild(wrapper);
+  return pdfBlob;
+}
+
+async function mergePdfBuffers(arrayBuffers){
+  const { PDFDocument } = PDFLib;
+  const outPdf = await PDFDocument.create();
+  for(const ab of arrayBuffers){
+    const donor = await PDFDocument.load(ab);
+    const donorPages = await outPdf.copyPages(donor, donor.getPageIndices());
+    donorPages.forEach(p=> outPdf.addPage(p));
+  }
+  const bytes = await outPdf.save();
+  return bytes;
+}
+
+function downloadBlob(blob, filename){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download=filename; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url), 5000);
+}
+
+function sanitizeFilename(s){ return s.replaceAll(/[^a-z0-9\-_. ]/ig,'_'); }
+
+// Initial render
+renderList();
+
+</script>
+</body>
+</html>
